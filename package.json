@@ -1,0 +1,26 @@
+{
+  "name": "partition-sequelize-ts",
+  "version": "1.0.0",
+  "description": "继承sequelize-typescript库并实现分区表的支持",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "node ./test/test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FujiBilly/partition-sequelize-ts.git"
+  },
+  "author": "Billy",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/FujiBilly/partition-sequelize-ts/issues"
+  },
+  "homepage": "https://github.com/FujiBilly/partition-sequelize-ts#readme",
+  "dependencies": {
+    "pg": "^7.12.1",
+    "reflect-metadata": "^0.1.13",
+    "sequelize": "^4.44.3",
+    "sequelize-typescript": "^0.6.11"
+  }
+}
