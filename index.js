@@ -9,6 +9,116 @@ class PartitionModel extends Model {
     super(values, options);
   }
 
+  static _createPartitionModelV10 (options) {
+    // pgsql版本10的分区主表不能有主键
+    const attributes = this.tableAttributes;
+    const primaryKey = [];
+    for (const name in attributes) {
+      const attr = attributes[name];
+      if (attr.primaryKey) {
+        primaryKey.push(name);
+        attr.allowNull = false;
+        delete attr.primaryKey;
+      }
+    }
+    // 分区子表使用unique索引代替主键
+    if (!this.options.indexes) {
+      this.options.indexes = [];
+    }
+    this.options.indexes.push({
+      fields: primaryKey,
+      unique: true,
+    });
+    // 生成创建分区主表的SQL
+    const attrs = this.QueryInterface.QueryGenerator.attributesToSQL(attributes, {
+      context: 'createTable',
+    });
+    let createTableSql = this.QueryInterface.QueryGenerator.createTableQuery(this.getTableName(options), attrs, options);
+    createTableSql = createTableSql.substring(0, createTableSql.length - 1) + ` PARTITION BY ${options.partition} ("${options.partitionKey}");`;
+    return this.sequelize.query(createTableSql, options);
+  }
+
+  static _createPartitionModelV11 (options) {
+    const attributes = this.tableAttributes;
+    // 生成创建分区主表的SQL
+    const attrs = this.QueryInterface.QueryGenerator.attributesToSQL(attributes, {
+      context: 'createTable',
+    });
+    let createTableSql = this.QueryInterface.QueryGenerator.createTableQuery(this.getTableName(options), attrs, options);
+    createTableSql = createTableSql.substring(0, createTableSql.length - 1) + ` PARTITION BY ${options.partition} ("${options.partitionKey}");`;
+    return this.sequelize.query(createTableSql, options);
+  }
+
+  static _createIndexV10 (options) {
+    // 同步每个分区子表的索引结构
+    const tableNameList = [];
+    let indexOptions = this.options.indexes;
+    for (const suffix in options.partitionRule) {
+      tableNameList.push(`${this.getTableName(options) + suffix}`);
+    }
+    return Promise.map(tableNameList, tableName => this.QueryInterface.showIndex(tableName, options))
+      .then(indexesList => {
+        const createIdxPrmList = [];
+        for (let i = 0 ; i < indexesList.length; i++) {
+          let indexes = indexesList[i];
+          const tableName = tableNameList[i];
+          for (const index of indexOptions) {
+            delete index.name;
+          }
+          indexOptions = this.QueryInterface.nameIndexes(indexOptions, tableName);
+          indexes = _.filter(indexOptions, item1 =>
+            !_.some(indexes, item2 => item1.name === item2.name),
+          ).sort((index1, index2) => {
+            if (this.sequelize.options.dialect === 'postgres') {
+              // move concurrent indexes to the bottom to avoid weird deadlocks
+              if (index1.concurrently === true) return 1;
+              if (index2.concurrently === true) return -1;
+            }
+            return 0;
+          });
+          for (const index of indexes) {
+            createIdxPrmList.push(this.QueryInterface.addIndex(
+              tableName,
+              _.assign({
+                logging: options.logging,
+                benchmark: options.benchmark,
+                transaction: options.transaction,
+              }, index),
+              tableName,
+            ));
+          }
+        }
+        return Promise.all(createIdxPrmList);
+      });
+  }
+
+  static _createIndexV11 (options) {
+    return Promise.try(() => this.QueryInterface.showIndex(this.getTableName(options), options))
+      .then((indexes) => {
+        // Assign an auto-generated name to indexes which are not named by the user
+        this.options.indexes = this.QueryInterface.nameIndexes(this.options.indexes, this.tableName);
+        indexes = _.filter(this.options.indexes, item1 =>
+          !_.some(indexes, item2 => item1.name === item2.name)
+        ).sort((index1, index2) => {
+          if (this.sequelize.options.dialect === 'postgres') {
+            // move concurrent indexes to the bottom to avoid weird deadlocks
+            if (index1.concurrently === true) return 1;
+            if (index2.concurrently === true) return -1;
+          }
+          return 0;
+        });
+        return Promise.map(indexes, index => this.QueryInterface.addIndex(
+          this.getTableName(options),
+          _.assign({
+            logging: options.logging,
+            benchmark: options.benchmark,
+            transaction: options.transaction
+          }, index),
+          this.tableName
+        ));
+      });
+  }
+
   static sync(options) {
     if (!this.options.partition) {
       return super.sync(options);
@@ -16,49 +126,33 @@ class PartitionModel extends Model {
     options = _.extend({}, this.options, options);
     options.hooks = options.hooks === undefined ? true : !!options.hooks;
     const attributes = this.tableAttributes;
-    let prititionColumn;
+    let version;
     return Promise.try(() => {
-      if (options.hooks) {
-        // @ts-ignore
-        return this.runHooks('beforeSync', options);
-      }
+      return this.sequelize.query('show server_version');
     })
+      .then((verionRet) => {
+        version = verionRet[0].server_version.split('.')[0];
+        if (version !== '10' && version !== '11') {
+          throw new Error(`postgresql version${version} not support`);
+        }
+        if (options.hooks) {
+          return this.runHooks('beforeSync', options);
+        }
+      })
       .then(() => {
         if (options.force) {
           return this.drop(options);
         }
       })
       .then(() => {
-        // pgsql版本10的分区主表不能有主键
-        const primaryKey = [];
-        for (const name in attributes) {
-          const attr = attributes[name];
-          if (attr.primaryKey) {
-            primaryKey.push(name);
-            attr.allowNull = false;
-            delete attr.primaryKey;
-          }
-          if (name === this.options.partitionKey) {
-            prititionColumn = attributes[name];
-          }
+        if (version === '10') {
+          return this._createPartitionModelV10(options);
+        } else if (version === '11') {
+          return this._createPartitionModelV11(options);
         }
-        // 分区子表使用unique索引代替主键
-        if (!this.options.indexes) {
-          this.options.indexes = [];
-        }
-        this.options.indexes.push({
-          fields: primaryKey,
-          unique: true,
-        });
-        // 生成创建分区主表的SQL
-        const attrs = this.QueryInterface.QueryGenerator.attributesToSQL(attributes, {
-          context: 'createTable',
-        });
-        let createTableSql = this.QueryInterface.QueryGenerator.createTableQuery(this.getTableName(options), attrs, options);
-        createTableSql = createTableSql.substring(0, createTableSql.length - 1) + ` PARTITION BY ${options.partition} ("${options.partitionKey}");`;
-        return this.sequelize.query(createTableSql, options);
       })
       .then(() => {
+        let prititionColumn = attributes[this.options.partitionKey];
         // 同步分区子表
         const pmList = [];
         for (const suffix in options.partitionRule) {
@@ -128,50 +222,14 @@ class PartitionModel extends Model {
         }
       })
       .then(() => {
-        // 同步每个分区子表的索引结构
-        const tableNameList = [];
-        let indexOptions = this.options.indexes;
-        for (const suffix in options.partitionRule) {
-          tableNameList.push(`${this.getTableName(options) + suffix}`);
+        if (version === '10') {
+          return this._createIndexV10(options);
+        } else if (version === '11') {
+          return this._createIndexV11(options);
         }
-        return Promise.map(tableNameList, tableName => this.QueryInterface.showIndex(tableName, options))
-          .then(indexesList => {
-            const createIdxPrmList = [];
-            for (let i = 0 ; i < indexesList.length; i++) {
-              let indexes = indexesList[i];
-              const tableName = tableNameList[i];
-              for (const index of indexOptions) {
-                delete index.name;
-              }
-              indexOptions = this.QueryInterface.nameIndexes(indexOptions, tableName);
-              indexes = _.filter(indexOptions, item1 =>
-                !_.some(indexes, item2 => item1.name === item2.name),
-              ).sort((index1, index2) => {
-                if (this.sequelize.options.dialect === 'postgres') {
-                  // move concurrent indexes to the bottom to avoid weird deadlocks
-                  if (index1.concurrently === true) return 1;
-                  if (index2.concurrently === true) return -1;
-                }
-                return 0;
-              });
-              for (const index of indexes) {
-                createIdxPrmList.push(this.QueryInterface.addIndex(
-                  tableName,
-                  _.assign({
-                    logging: options.logging,
-                    benchmark: options.benchmark,
-                    transaction: options.transaction,
-                  }, index),
-                  tableName,
-                ));
-              }
-            }
-            return Promise.all(createIdxPrmList);
-          });
       })
       .then(() => {
         if (options.hooks) {
-          // @ts-ignore
           return this.runHooks('afterSync', options);
         }
       }).return(this);

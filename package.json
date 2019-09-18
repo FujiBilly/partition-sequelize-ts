@@ -1,11 +1,11 @@
 {
   "name": "partition-sequelize-ts",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "继承sequelize-typescript库并实现分区表的支持",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "test": "node ./test/test.js"
+
   },
   "repository": {
     "type": "git",

@@ -1,5 +1,5 @@
 # partition-sequelize-ts
-拓展sequelize-typescript库使其支持Postgresql分区表
+改进 `sequelize-typescript` 库使其支持 `Postgresql` 10/11版本的分区表
 
 使用示例：
  ```typescript
